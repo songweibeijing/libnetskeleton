@@ -41,4 +41,12 @@
 #include <ctype.h>
 #include <poll.h>
 
+#define my_free(x) do {\
+        if(!x) \
+        {\
+            free(x);\
+            x=NULL;\
+        }\
+    }while(0)
+
 #endif

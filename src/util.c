@@ -352,45 +352,47 @@ ssize_t writen(int fd, const void *vptr, size_t n)
 */
 int generic_getport(struct sockaddr_storage *a)
 {
-	struct sockaddr_in *si;
-	struct sockaddr_in6 *si6;
+    struct sockaddr_in *si;
+    struct sockaddr_in6 *si6;
 
-	switch (a->ss_family) {
-	case AF_UNIX:
-		return 1;
-	case AF_INET:
-		si = (struct sockaddr_in *)a;
-		return ntohs(si->sin_port);
-	case AF_INET6:
-		si6 = (struct sockaddr_in6 *)a;
-		return ntohs(si6->sin6_port);
-	default:
-		printf("generic_getport: Unknown address family %d", a->ss_family);
-	}
-	return 0;
+    switch (a->ss_family)
+    {
+        case AF_UNIX:
+            return 1;
+        case AF_INET:
+            si = (struct sockaddr_in *)a;
+            return ntohs(si->sin_port);
+        case AF_INET6:
+            si6 = (struct sockaddr_in6 *)a;
+            return ntohs(si6->sin6_port);
+        default:
+            printf("generic_getport: Unknown address family %d", a->ss_family);
+    }
+    return 0;
 }
 
 int generic_setport(struct sockaddr_storage *a, int port)
 {
-	struct sockaddr_in *si;
-	struct sockaddr_in6 *si6;
+    struct sockaddr_in *si;
+    struct sockaddr_in6 *si6;
 
-	switch (a->ss_family) {
-	case AF_UNIX:
-		/* No port for Unix domain sockets */
-		return 1;
-	case AF_INET:
-		si = (struct sockaddr_in *)a;
-		si->sin_port = htons(port);
-		return 1;
-	case AF_INET6:
-		si6 = (struct sockaddr_in6 *)a;
-		si6->sin6_port = htons(port);
-		return 1;
-	default:
-		printf("generic_setport: Unknown address family %d", a->ss_family);
-	}
-	return 0;
+    switch (a->ss_family)
+    {
+        case AF_UNIX:
+            /* No port for Unix domain sockets */
+            return 1;
+        case AF_INET:
+            si = (struct sockaddr_in *)a;
+            si->sin_port = htons(port);
+            return 1;
+        case AF_INET6:
+            si6 = (struct sockaddr_in6 *)a;
+            si6->sin6_port = htons(port);
+            return 1;
+        default:
+            printf("generic_setport: Unknown address family %d", a->ss_family);
+    }
+    return 0;
 }
 
 /* Takes a struct sockaddr_storage and returns the name in a static buffer.
@@ -398,68 +400,72 @@ int generic_setport(struct sockaddr_storage *a, int port)
 */
 char *generic_ntoa(struct sockaddr_storage *a)
 {
-	static char b[1024];
-	struct sockaddr_in *si;
-	struct sockaddr_in6 *si6;
-	struct sockaddr_un *su;
+    static char b[1024];
+    struct sockaddr_in *si;
+    struct sockaddr_in6 *si6;
+    struct sockaddr_un *su;
 
-	switch (a->ss_family) {
-	case AF_INET:
-		si = (struct sockaddr_in *)a;
-		snprintf(b, sizeof b, "%s", inet_ntoa(si->sin_addr));
-		break;
-	case AF_INET6:
-		si6 = (struct sockaddr_in6 *)a;
-		if (inet_ntop(AF_INET6, &si6->sin6_addr, b, sizeof b) == NULL) {
-			printf("generic_ntoa: can't convert address");
-			strcpy(b, "(cannot convert address)");
-		}
-		break;
-	case AF_UNIX:
-		su = (struct sockaddr_un *)a;
-		snprintf(b, sizeof b, "%s", su->sun_path);
-		break;
-	default:
-		printf("generic_ntoa: unknown address family %d", a->ss_family);
-		sprintf(b, "(unknown address family %d", a->ss_family);
-	}
-	return b;
+    switch (a->ss_family)
+    {
+        case AF_INET:
+            si = (struct sockaddr_in *)a;
+            snprintf(b, sizeof b, "%s", inet_ntoa(si->sin_addr));
+            break;
+        case AF_INET6:
+            si6 = (struct sockaddr_in6 *)a;
+            if (inet_ntop(AF_INET6, &si6->sin6_addr, b, sizeof b) == NULL)
+            {
+                printf("generic_ntoa: can't convert address");
+                strcpy(b, "(cannot convert address)");
+            }
+            break;
+        case AF_UNIX:
+            su = (struct sockaddr_un *)a;
+            snprintf(b, sizeof b, "%s", su->sun_path);
+            break;
+        default:
+            printf("generic_ntoa: unknown address family %d", a->ss_family);
+            sprintf(b, "(unknown address family %d", a->ss_family);
+    }
+    return b;
 }
 
 void generic_dumpaddr(struct sockaddr_storage *a)
 {
-	switch (a->ss_family) {
-	case AF_INET:
-		printf("Family: AF_INET");
-		printf("Port: %d", generic_getport(a));
-		printf("Address: %s", generic_ntoa(a));
-		break;
-	case AF_INET6:
-		printf("Family: AF_INET6");
-		printf("Port: %d", generic_getport(a));
-		printf("Address: %s", generic_ntoa(a));
-		break;
-	case AF_UNIX:
-		printf("Family: AF_UNIX");
-		printf("Path: %s", generic_ntoa(a));
-		break;
-	default:
-		printf("generic_dumpaddr: Unknown address family %d", a->ss_family);
-	}
+    switch (a->ss_family)
+    {
+        case AF_INET:
+            printf("Family: AF_INET");
+            printf("Port: %d", generic_getport(a));
+            printf("Address: %s", generic_ntoa(a));
+            break;
+        case AF_INET6:
+            printf("Family: AF_INET6");
+            printf("Port: %d", generic_getport(a));
+            printf("Address: %s", generic_ntoa(a));
+            break;
+        case AF_UNIX:
+            printf("Family: AF_UNIX");
+            printf("Path: %s", generic_ntoa(a));
+            break;
+        default:
+            printf("generic_dumpaddr: Unknown address family %d", a->ss_family);
+    }
 }
 
 int generic_ss_size(struct sockaddr_storage *ss)
 {
-	switch (ss->ss_family) {
-	case AF_UNIX:
-		return sizeof(struct sockaddr_un);
-	case AF_INET:
-		return sizeof(struct sockaddr_in);
-	case AF_INET6:
-		return sizeof(struct sockaddr_in6);
-	default:
-		printf("generic_ss_size: unknown address family %d", ss->ss_family);
-		return sizeof(struct sockaddr_storage);
-	}
+    switch (ss->ss_family)
+    {
+        case AF_UNIX:
+            return sizeof(struct sockaddr_un);
+        case AF_INET:
+            return sizeof(struct sockaddr_in);
+        case AF_INET6:
+            return sizeof(struct sockaddr_in6);
+        default:
+            printf("generic_ss_size: unknown address family %d", ss->ss_family);
+            return sizeof(struct sockaddr_storage);
+    }
 }
 

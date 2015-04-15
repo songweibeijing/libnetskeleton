@@ -30,13 +30,13 @@ extern "C" {
     ssize_t writen(int fd, const void *vptr, size_t n);
     ssize_t readn(int fd, void *vptr, size_t n);
 
-	int generic_getport(struct sockaddr_storage *a);
-	int generic_setport(struct sockaddr_storage *a, int port);
-	char *generic_ntoa(struct sockaddr_storage *a);
-	void generic_dumpaddr(struct sockaddr_storage *a);
-	int generic_ss_size(struct sockaddr_storage *ss);
-	int generic_aton(char *name, struct sockaddr_storage *addr);
-	
+    int generic_getport(struct sockaddr_storage *a);
+    int generic_setport(struct sockaddr_storage *a, int port);
+    char *generic_ntoa(struct sockaddr_storage *a);
+    void generic_dumpaddr(struct sockaddr_storage *a);
+    int generic_ss_size(struct sockaddr_storage *ss);
+    int generic_aton(char *name, struct sockaddr_storage *addr);
+
 #if defined(__cplusplus)
 }
 #endif

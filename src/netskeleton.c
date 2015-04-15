@@ -1,3 +1,4 @@
+#include "work_threads.h"
 #include "netskeleton.h"
 #include "util.h"
 
@@ -26,12 +27,17 @@ enum try_read_result
     READ_MEMORY_ERROR      /** failed to allocate more memory */
 };
 
+#define CONN_ERROR 0x00000001
+
 typedef struct conn
 {
     int type;
     int fd;
     struct event event;
     time_t active_time;     /** the last time this connection is accessed */
+
+    int flags;
+    int refercount;
 
     char   *rbuf;   /** buffer to read commands into */
     char   *rcurr;  /** but if we parsed some already, this is where we stopped */
@@ -43,6 +49,7 @@ typedef struct conn
     int request_addr_size;
     struct generic_server *gs; /** the sever this connection belongs to */
     struct list_head list;
+    pthread_mutex_t connlock;
 } conn;
 
 typedef struct generic_server
@@ -54,7 +61,8 @@ typedef struct generic_server
     char  ip[MAX_IP_LEN];
     char  unix_path[MAX_PATH_LEN];
     uint32_t max_live;
-    server_process proc_func;
+    server_process parse_request;
+    server_process handle_request;
 
     int  lfd; /** listen fd in TCP mode */
     struct event_base *main_event_base; /** the main base */
@@ -63,6 +71,14 @@ typedef struct generic_server
     int conn_num;
     struct list_head conn_head;
     struct list_head list;
+
+    //thread info
+    int mt;
+    int thread_num;
+    int max_queue_num;
+    work_threads *pworks;
+
+    pthread_mutex_t serverlock;
 } generic_server;
 
 typedef struct generic_timer
@@ -76,13 +92,57 @@ typedef struct generic_timer
     struct list_head list;
 } generic_timer;
 
-void conn_free(conn *curr_conn)
+
+void set_conn_error(conn *curr_conn)
+{
+    if (curr_conn)
+    {
+        pthread_mutex_lock(&curr_conn->connlock);
+        curr_conn->flags = CONN_ERROR;
+        pthread_mutex_unlock(&curr_conn->connlock);
+    }
+}
+
+int is_conn_error(conn *curr_conn)
+{
+    int flag = 0;
+    if (curr_conn)
+    {
+        pthread_mutex_lock(&curr_conn->connlock);
+        flag = (curr_conn->flags == CONN_ERROR);
+        pthread_mutex_unlock(&curr_conn->connlock);
+    }
+    return flag;
+}
+
+void conn_ref(conn *curr_conn)
+{
+    if (curr_conn)
+    {
+        pthread_mutex_lock(&curr_conn->connlock);
+        curr_conn->refercount++;
+        pthread_mutex_unlock(&curr_conn->connlock);
+        return;
+    }
+}
+
+void conn_free_internal(conn *curr_conn)
 {
     if (NULL == curr_conn)
     {
         PERROR("curr conn is NULL\n");
         return;
     }
+
+    pthread_mutex_lock(&curr_conn->connlock);
+    curr_conn->refercount--;
+    if (curr_conn->refercount > 0)
+    {
+        pthread_mutex_unlock(&curr_conn->connlock);
+        return;
+    }
+    pthread_mutex_unlock(&curr_conn->connlock);
+
     event_del(&curr_conn->event);
     if (curr_conn->fd > 0)
     {
@@ -90,6 +150,38 @@ void conn_free(conn *curr_conn)
         curr_conn->fd = -1;
     }
     list_del(&curr_conn->list);
+    my_free(curr_conn->rbuf);
+    my_free(curr_conn);
+}
+
+void conn_free(conn *curr_conn)
+{
+    if (NULL == curr_conn)
+    {
+        PERROR("curr conn is NULL\n");
+        return;
+    }
+    generic_server *gs = curr_conn->gs;
+    pthread_mutex_lock(&curr_conn->connlock);
+    curr_conn->refercount--;
+    if (curr_conn->refercount != 0)
+    {
+        pthread_mutex_unlock(&curr_conn->connlock);
+        return;
+    }
+    pthread_mutex_unlock(&curr_conn->connlock);
+
+    event_del(&curr_conn->event);
+    if (curr_conn->fd > 0)
+    {
+        close(curr_conn->fd);
+        curr_conn->fd = -1;
+    }
+
+    pthread_mutex_lock(&gs->serverlock);
+    list_del(&curr_conn->list);
+    pthread_mutex_unlock(&gs->serverlock);
+
     my_free(curr_conn->rbuf);
     my_free(curr_conn);
 }
@@ -109,6 +201,8 @@ int add_conn(int fd, void *arg)
         return -1;
     }
 
+    curr_conn->refercount = 1;
+    curr_conn->flags = 0;
     curr_conn->type = gs->type;
     curr_conn->fd = fd;
     curr_conn->gs = gs;
@@ -137,12 +231,17 @@ int add_conn(int fd, void *arg)
         return -1;
     }
 
+    pthread_mutex_init(&curr_conn->connlock, NULL);
     curr_conn->active_time = time(NULL);
+    INIT_LIST_HEAD(&curr_conn->list);
+
+    pthread_mutex_lock(&gs->serverlock);
+    list_add_tail(&curr_conn->list, &gs->conn_head);
+    pthread_mutex_unlock(&gs->serverlock);
+
     event_set(&curr_conn->event, fd, EV_READ | EV_PERSIST, basic_read_request, curr_conn);
     event_base_set(gs->main_event_base, &curr_conn->event);
     event_add(&curr_conn->event, NULL);
-
-    list_add_tail(&curr_conn->list, &gs->conn_head);
     return 0;
 }
 
@@ -193,14 +292,20 @@ int add_listen_conn(int listenfd, void *arg)
         return -1;
     }
 
+    curr_conn->refercount = 1;
+    curr_conn->flags = 0;
     INIT_LIST_HEAD(&curr_conn->list);
     curr_conn->fd = listenfd;
     curr_conn->active_time = time(NULL);
+
+    pthread_mutex_lock(&gs->serverlock);
+    list_add_tail(&curr_conn->list, &gs->conn_head);
+    pthread_mutex_unlock(&gs->serverlock);
+
     event_set(&curr_conn->event, listenfd, EV_READ | EV_PERSIST, do_accept, arg);
     event_base_set(gs->main_event_base, &curr_conn->event);
     event_add(&curr_conn->event, NULL);
 
-    list_add_tail(&curr_conn->list, &gs->conn_head);
     return 0;
 }
 
@@ -260,15 +365,6 @@ static int try_read_tcp(conn *c)
         {
             gotdata = READ_DATA_RECEIVED;
             c->rbytes += res;
-            /*            if (res == avail)
-                        {
-                            continue;
-                        }
-                        else
-                        {
-                            break;
-                        }
-            */
             continue;
         }
         if (res == 0)
@@ -294,12 +390,107 @@ static int give_response(void *arg, char *resp, int resplen)
     if (curr_conn->type & TCP_MASK)
     {
         ret = write(curr_conn->fd, resp, resplen);
+        if (ret < 0)
+        {
+            printf("failed to write, error:%d, strerror:%s\n", errno, strerror(errno));
+        }
     }
     else
     {
+        char dbg[4096] = {0};
+        memcpy(dbg, resp, resplen);
         ret = sendto(curr_conn->fd, resp, resplen, 0, (struct sockaddr *)&curr_conn->request_addr, curr_conn->request_addr_size);
+        if (ret < 0)
+        {
+            printf("failed to sendto, error:%d, strerror:%s\n", errno, strerror(errno));
+        }
     }
     return ret;
+}
+
+typedef struct post_params
+{
+    conn *curr_conn;
+    char *request;
+    int  reqlen;
+} post_params;
+
+static int *post_handle(void *arg)
+{
+    generic_server *gs = NULL;
+    post_params *post = (post_params *) arg;
+    conn *curr_conn = post->curr_conn;
+    char *request = post->request;
+    int reqlen = post->reqlen;
+    int ret = -1;
+    char *response = NULL;
+    int resplen = 0;
+
+    my_free(post);
+    if (!curr_conn || is_conn_error(curr_conn))
+    {
+        if (gs->type & TCP_MASK)
+        {
+            conn_free(curr_conn);
+        }
+        return NULL;
+    }
+
+    gs = curr_conn->gs;
+    ret = gs->handle_request(request, reqlen, (void **)&response, &resplen);
+    if (ret == 0)
+    {
+        if (give_response(curr_conn, response, resplen) < 0)
+        {
+            printf("failed to give response\n");
+        }
+    }
+
+    my_free(request);
+    my_free(response);
+    if (gs->type & TCP_MASK)
+    {
+        conn_free(curr_conn);
+    }
+    return NULL;
+}
+
+static int handle_one_request(conn *curr_conn, char *request, int reqlen)
+{
+    int ret = -1;
+    generic_server *gs = curr_conn->gs;
+    char *response = NULL;
+    int resplen = 0;
+
+    if (gs->mt == 0) //no multi thread support.
+    {
+        ret = gs->handle_request(request, reqlen, (void **)&response, &resplen);
+        if (ret == 0)
+        {
+            if (give_response(curr_conn, response, resplen) < 0)
+            {
+                ret = -1;
+            }
+        }
+
+        my_free(request);
+        my_free(response);
+        return ret;
+    }
+    else
+    {
+        post_params *postparams = (post_params *)calloc(1, sizeof(post_params));
+        if (postparams)
+        {
+            conn_ref(curr_conn);
+            postparams->curr_conn = curr_conn;
+            postparams->request = request;
+            postparams->reqlen = reqlen;
+            create_job(gs->pworks, (job_handle)post_handle, (void *)postparams);
+            return 0;
+        }
+        return -1;
+    }
 }
 
 void basic_read_request(int fd, short event, void *arg)
@@ -324,7 +515,11 @@ void basic_read_request(int fd, short event, void *arg)
     if (res == READ_ERROR)
     {
         printf("close connection\n");
-        conn_free(curr_conn);
+        if (gs->type & TCP_MASK)
+        {
+            set_conn_error(curr_conn);
+            conn_free(curr_conn);
+        }
     }
     else if (res == READ_DATA_RECEIVED)
     {
@@ -332,12 +527,21 @@ void basic_read_request(int fd, short event, void *arg)
         {
             resp = NULL;
             resplen = 0;
-            ret = gs->proc_func(curr_conn->rcurr, curr_conn->rbytes, (void **)&resp, &resplen);
+            ret = gs->parse_request(curr_conn->rcurr, curr_conn->rbytes, (void **)&resp, &resplen);
             //process ok, return the length of data have been parsed.
             if (ret > 0)
             {
                 curr_conn->rcurr += ret;
                 curr_conn->rbytes -= ret;
+
+                //resp is allocated from heap.
+                if (resp != NULL)
+                {
+                    if (handle_one_request(curr_conn, resp, resplen) != 0)
+                    {
+                        stop = CLOSE_CONNECTION;
+                    }
+                }
             }
             else if (ret == 0)
             {
@@ -349,23 +553,13 @@ void basic_read_request(int fd, short event, void *arg)
             {
                 stop = CLOSE_CONNECTION;
             }
-            if (resp != NULL)
-            {
-                ret = give_response(curr_conn, resp, resplen);
-                if ((ret <= 0) && (gs->type & TCP_MASK))
-                {
-                    conn_free(curr_conn);
-                }
-                free(resp);
-                resp = NULL;
-                resplen = 0;
-            }
 
-			//parse error. close the connection if it is TCP.
-			if (stop==CLOSE_CONNECTION && gs->type & TCP_MASK)
-			{
-				conn_free(curr_conn);
-			}
+            //parse error. close the connection if it is TCP.
+            if (stop == CLOSE_CONNECTION && (gs->type & TCP_MASK))
+            {
+                set_conn_error(curr_conn);
+                conn_free(curr_conn);
+            }
         }
     }
     //otherwise, just return
@@ -381,15 +575,20 @@ static void destroy_generic_server(generic_server *gs)
     if (gs->lfd > 0)
     {
         close(gs->lfd);
+        gs->lfd = 0;
     }
 
     struct list_head *list = NULL;
     conn *curr_conn = NULL;
+    pthread_mutex_lock(&gs->serverlock);
     list_for_each(list, &gs->conn_head)
     {
         curr_conn = list_entry(list, struct conn, list);
-        conn_free(curr_conn);
+        set_conn_error(curr_conn);
+        conn_free_internal(curr_conn);
     }
+    pthread_mutex_unlock(&gs->serverlock);
+    pthread_mutex_destroy(&gs->serverlock);
     my_free(gs);
 }
 
@@ -400,7 +599,13 @@ void expire_conn_process(int fd, short event, void *arg)
     conn *curr_conn = NULL;
     generic_server *gs = (generic_server *)arg;
 
+    if ((gs->type & TCP_MASK) == 0)
+    {
+        return;
+    }
+
     time_t now = time(NULL);
+    pthread_mutex_lock(&gs->serverlock);
     list_for_each(ptr, &gs->conn_head)
     {
         curr_conn = list_entry(ptr, conn, list);
@@ -416,8 +621,10 @@ void expire_conn_process(int fd, short event, void *arg)
         {
             continue;
         }
-        conn_free(curr_conn);
+        set_conn_error(curr_conn);
+        conn_free_internal(curr_conn);
     }
+    pthread_mutex_unlock(&gs->serverlock);
 
     init_conn_expire_timer(arg);
 }
@@ -516,10 +723,6 @@ int bind_tcp_path(char *path)
 #ifdef DEBUG
     PERROR("listen fd:%d on path:%s\n", fd, addr.sun_path);
 #endif
-    /*int on = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-    */
-
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
         PERROR("bind error:%s!\n", strerror(errno));
@@ -720,6 +923,7 @@ static generic_server *create_generic_server(server_param *param)
         return NULL;
     }
 
+    pthread_mutex_init(&gs->serverlock, NULL);
     gs->listen_port = param->port;
     if (param->ip != NULL && strlen(param->ip) > 0)
     {
@@ -728,11 +932,38 @@ static generic_server *create_generic_server(server_param *param)
     gs->max_live = param->max_live;
     gs->conn_num = 0;
     gs->lfd = 0;
-    gs->proc_func = param->func;
-    snprintf(gs->unix_path, MAX_PATH_LEN, "%s", param->path);
+    gs->parse_request = param->parse_request;
+    gs->handle_request = param->handle_request;
+    if (param->path)
+    {
+        snprintf(gs->unix_path, MAX_PATH_LEN, "%s", param->path);
+    }
     gs->type = param->type;
     INIT_LIST_HEAD(&gs->conn_head);
     INIT_LIST_HEAD(&gs->list);
+
+    //threads config
+    gs->thread_num = param->thread_num;
+    gs->max_queue_num = param->max_queue_num;
+    if (gs->thread_num < 0)
+    {
+        gs->thread_num = 4;
+    }
+    if (gs->max_queue_num < 0)
+    {
+        gs->max_queue_num = 10240;
+    }
+    if (gs->thread_num > 0)
+    {
+        gs->mt = 1;
+        gs->pworks = init_work_threads(gs->thread_num, gs->max_queue_num);
+        if (!gs->pworks)
+        {
+            my_free(gs);
+            return NULL;
+        }
+    }
+    //end
 
     return gs;
 }
@@ -744,7 +975,12 @@ static int check_server_param(server_param *param)
         PERROR("param is NULL\n");
         return -1;
     }
-    if (param->func == NULL)
+    if (param->parse_request == NULL)
+    {
+        PERROR("param has empty process function\n");
+        return -1;
+    }
+    if (param->handle_request == NULL)
     {
         PERROR("param has empty process function\n");
         return -1;
@@ -929,3 +1165,9 @@ void start_servers_array_loop(servers_array *servers)
     event_base_dispatch(servers->main_event_base);
 }
 
+int init_global_env()
+{
+    signal(SIGPIPE, SIG_IGN);
+    init_work_threads_env();
+    return 0;
+}

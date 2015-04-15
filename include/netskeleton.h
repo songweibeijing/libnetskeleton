@@ -40,7 +40,7 @@ extern "C" {
      * @return (IMPORTANT)
             return = 0   -- it means the server needs more data.
             return < 0   -- it means process error. the skeleton will close the connection.
-            				  before closing the connection, it will send the response to the client if it has.
+                              before closing the connection, it will send the response to the client if it has.
             return > 0   -- the length of the buffer has been parsed.
      */
     typedef int (*server_process)(void *request, int reqlen, void **response, int *resplen);
@@ -65,7 +65,10 @@ extern "C" {
         char *path; /** (Required) used only TCP_PATH and UDP_PATH mode */
         int max_live; /** (Optional) used only in TCP mode, the max live time of inactive connection in the server
                           if the value <=0, this connection expire does not work  */
-        server_process func; /**(Required) the handle of the server */
+        int thread_num; /*the number of threads*/
+        int max_queue_num; /*the max number of jobs in queue.*/
+        server_process parse_request;  /* (Required) the handle of parsing server */
+        server_process handle_request; /**(Required) the handle of the server */
     } server_param;
 
     /**
@@ -90,6 +93,12 @@ extern "C" {
         struct list_head tm_head;
         struct list_head server_head;
     } servers_array;
+
+    /*
+    *  init the global environment settings
+    *  it should be called at the first place.
+    * */
+    int init_global_env();
 
     /**
      * Create one servers_array
